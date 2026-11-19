@@ -28,6 +28,7 @@ from mosaic_shared.problems.thermal_mesh import (
 from mosaic_shared.problems.thermal_mesh import (
     OutputSchema as _CanonicalOutputSchema,
 )
+from mosaic_shared.problems.thermal_transient import TransientFields
 from mosaic_shared.schema_types import make_differentiable
 from pydantic import Field
 from scipy.spatial import cKDTree
@@ -38,9 +39,24 @@ from tesseract_core.runtime import ShapeDType
 # ---------------------------------------------------------------------------
 
 
-class InputSchema(make_differentiable(_CanonicalInputSchema, ["rho", "source"])):
-    """Inputs for Firedrake thermal solver, extended with material parameters."""
+class InputSchema(
+    make_differentiable(_CanonicalInputSchema, ["rho", "source"]), TransientFields
+):
+    """Inputs for Firedrake thermal solver, extended with material parameters.
 
+    With ``steps > 0`` (thermal-transient) the solver takes ``steps`` backward Euler
+    steps from ``initial_temperature`` instead of the steady solve.
+    """
+
+    adjoint_checkpoints: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "thermal-transient only: keep this many snapshots in memory and recompute "
+            "the rest of the forward steps in the adjoint sweep (Revolve, via "
+            "checkpoint_schedules). None keeps every step on the tape."
+        ),
+    )
     k_max: float = Field(
         default=1.0,
         description="Maximum thermal conductivity (fully solid/conducting material).",
@@ -429,6 +445,147 @@ def _gradient_pair(
 
 
 # ---------------------------------------------------------------------------
+# Transient solve (thermal-transient: steps > 0)
+# ---------------------------------------------------------------------------
+
+# The mesh, function spaces and reorder maps for the last (mesh, BC) seen; the tape
+# is recorded fresh on every transient call, since dt, steps, the initial
+# temperature and the checkpointing schedule all change it.
+_TRANSIENT_MESH_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _transient_heat(
+    inputs: "InputSchema",
+    pts: np.ndarray,
+    cells: np.ndarray,
+    dm: np.ndarray,
+    dv: np.ndarray,
+    vm: np.ndarray,
+    vv: np.ndarray,
+    cot_compliance: float = 0.0,
+    cot_id_error: float = 0.0,
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    """Backward Euler from the initial temperature; returns (C, I, dL/drho, dL/dsource).
+
+    Solves ``steps`` steps of size ``dt`` of dT/dt = div(k(rho) grad T) + f with the
+    thermal-mesh boundary conditions:
+
+        (T_{n+1} - T_n, v) + dt (k(rho) grad T_{n+1}, grad v) = dt (f, v) + dt (q_n, v)_{Gamma_N}
+
+    and reports the compliance and the identification error of the final temperature.
+    The forward matrix is constant over the steps, so it is factorised once
+    (constant_jacobian). Gradients come from pyadjoint's discrete adjoint of the whole
+    loop, weighted by the two cotangents (L = c_C C + c_I I); with
+    ``adjoint_checkpoints`` the tape keeps that many snapshots and recomputes the rest
+    (MultistageCheckpointSchedule, i.e. Revolve in memory).
+    """
+    key = _setup_cache_key(pts, cells, dm, dv, vm, vv, params=())
+    if key not in _TRANSIENT_MESH_CACHE:
+        _TRANSIENT_MESH_CACHE.clear()
+        mesh, neumann_offset, active = _build_firedrake_mesh(pts, cells, dm, vm)
+        _TRANSIENT_MESH_CACHE[key] = {
+            "mesh": mesh,
+            "neumann_offset": neumann_offset,
+            "active": active,
+            "V": FunctionSpace(mesh, "CG", 1),
+            "DG0": FunctionSpace(mesh, "DG", 0),
+            "fd_to_input_cells": _cell_reorder_map(pts, cells, mesh),
+            "fd_to_input_nodes": _node_reorder_map(pts, mesh),
+        }
+    m = _TRANSIENT_MESH_CACHE[key]
+    V, DG0 = m["V"], m["DG0"]
+    fd_cells, fd_nodes = m["fd_to_input_cells"], m["fd_to_input_nodes"]
+    n_cells = len(cells)
+    steps = int(inputs.steps)
+
+    tape = Tape()
+    set_working_tape(tape)
+    if inputs.adjoint_checkpoints is not None:
+        from checkpoint_schedules import MultistageCheckpointSchedule
+
+        tape.enable_checkpointing(
+            MultistageCheckpointSchedule(
+                steps, min(inputs.adjoint_checkpoints, steps), 0
+            )
+        )
+    continue_annotation()
+
+    rho_fn = Function(DG0, name="rho")
+    rho_fn.dat.data[:] = np.clip(
+        np.asarray(inputs.rho[:n_cells], dtype=np.float64)[fd_cells], 0.0, 1.0
+    )
+    source_fn = Function(DG0, name="source")
+    src = np.asarray(inputs.source, dtype=np.float64)
+    has_source = fd_cells < len(src)
+    source_fn.dat.data[has_source] = src[fd_cells[has_source]]
+
+    k_min = Constant(1e-3 * inputs.k_max)
+    k_field = k_min + (Constant(inputs.k_max) - k_min) * rho_fn ** Constant(
+        inputs.p_exp
+    )
+    dt = Constant(float(np.asarray(inputs.dt)[0]))
+
+    T0 = np.asarray(inputs.initial_temperature, dtype=np.float64)
+    T_old = Function(V, name="T")
+    known = fd_nodes < len(T0)
+    T_old.dat.data[known] = T0[fd_nodes[known]]
+
+    T, v = TrialFunction(V), TestFunction(V)
+    a = T * v * dx + dt * inner(k_field * grad(T), grad(v)) * dx
+    L = T_old * v * dx + dt * source_fn * v * dx
+    flux = inner(Constant(0.0), T_old) * dx
+    for k in range(vv.shape[0]):
+        tag = m["neumann_offset"] + (k + 1)
+        if tag not in m["active"]:
+            continue
+        q_n = Constant(float(vv[k, 0]))
+        L = L + dt * q_n * v * ds(tag)
+        flux = flux + q_n * T_old * ds(tag)
+    bcs = [DirichletBC(V, Constant(float(dv[k, 0])), k + 1) for k in range(dv.shape[0])]
+    T_new = Function(V)
+    solver = LinearVariationalSolver(
+        LinearVariationalProblem(a, L, T_new, bcs=bcs, constant_jacobian=True),
+        solver_parameters=_SOLVER_PARAMETERS,
+    )
+    loop = (
+        range(steps)
+        if inputs.adjoint_checkpoints is None
+        else tape.timestepper(iter(range(steps)))
+    )
+    for _ in loop:
+        solver.solve()
+        T_old.assign(T_new)
+    C = assemble(flux)
+    pause_annotation()
+
+    # mosaic-intervention: nodal-misfit-seed
+    T_fd = T_old.dat.data_ro.copy()
+    T_tgt = np.asarray(inputs.target_temperature, dtype=np.float64)
+    has_target = fd_nodes < len(T_tgt)
+    misfit = np.zeros_like(T_fd)
+    misfit[has_target] = T_fd[has_target] - T_tgt[fd_nodes[has_target]]
+    I_val = float(np.sum(misfit**2))
+    # mosaic-intervention-end: nodal-misfit-seed
+
+    d_rho, d_source = np.zeros(n_cells), np.zeros(n_cells)
+    controls = [Control(rho_fn), Control(source_fn)]
+    if cot_compliance != 0.0:
+        g = ReducedFunctional(C, controls, tape=tape).derivative()
+        d_rho[fd_cells] += cot_compliance * g[0].dat.data_ro
+        d_source[fd_cells] += cot_compliance * g[1].dat.data_ro
+    if cot_id_error != 0.0:
+        # mosaic-intervention: nodal-misfit-seed
+        dI_dT = Cofunction(V.dual())
+        dI_dT.dat.data[:] = 2.0 * misfit
+        g = ReducedFunctional(T_old, controls, tape=tape).derivative(adj_input=dI_dT)
+        # mosaic-intervention-end: nodal-misfit-seed
+        d_rho[fd_cells] += cot_id_error * g[0].dat.data_ro
+        d_source[fd_cells] += cot_id_error * g[1].dat.data_ro
+    tape.clear_tape()
+    return float(C), I_val, d_rho, d_source
+
+
+# ---------------------------------------------------------------------------
 # Tesseract endpoints
 # ---------------------------------------------------------------------------
 
@@ -462,6 +619,12 @@ def apply(inputs: InputSchema) -> OutputSchema:
     vv = np.asarray(
         bc.neumann.values if bc.neumann else np.zeros((0, 1)), dtype=np.float64
     )
+
+    if inputs.steps > 0:
+        C, I_val, _, _ = _transient_heat(inputs, pts, cells, dm, dv, vm, vv)
+        return OutputSchema(
+            thermal_compliance=np.float32(C), identification_error=np.float32(I_val)
+        )
 
     J_val, T_nodes, _ = _replay_heat(
         rho_values,
@@ -530,6 +693,29 @@ def vector_jacobian_product(
     vv = np.asarray(
         bc.neumann.values if bc.neumann else np.zeros((0, 1)), dtype=np.float64
     )
+
+    if inputs.steps > 0:
+        _, _, d_rho, d_source = _transient_heat(
+            inputs,
+            pts,
+            cells,
+            dm,
+            dv,
+            vm,
+            vv,
+            cot_compliance=float(cotangent_vector.get("thermal_compliance", 0.0)),
+            cot_id_error=float(cotangent_vector.get("identification_error", 0.0)),
+        )
+        result: dict[str, Any] = {}
+        if want_rho:
+            result["rho"] = np.zeros(len(np.asarray(inputs.rho)), dtype=np.float32)
+            result["rho"][: hm.n_faces] = d_rho.astype(np.float32)
+        if want_source:
+            result["source"] = np.zeros(
+                len(np.asarray(inputs.source)), dtype=np.float32
+            )
+            result["source"][: hm.n_faces] = d_source.astype(np.float32)
+        return result
 
     _, _, entry = _replay_heat(
         rho_values,

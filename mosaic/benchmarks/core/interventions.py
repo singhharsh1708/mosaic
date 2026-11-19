@@ -126,6 +126,7 @@ SETUPS: dict[str, Setup] = {
         Setup("ns-3d", "ns-3d-grid", "Triply periodic box"),
         Setup("structural", "structural-mesh", "Linear-elastic cantilever"),
         Setup("heat", "thermal-mesh", "Steady conduction in a slab"),
+        Setup("heat-transient", "thermal-transient", "Transient conduction in a slab"),
     )
 }
 
@@ -138,7 +139,7 @@ DOMAIN_SETUPS: dict[str, tuple[str, ...]] = {
         "ns-3d",
     ),
     "structural-mesh": ("structural",),
-    "thermal-mesh": ("heat",),
+    "thermal-mesh": ("heat", "heat-transient"),
 }
 
 
