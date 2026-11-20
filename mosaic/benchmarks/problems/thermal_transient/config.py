@@ -80,9 +80,10 @@ problem = Problem(
         "are known in closed form at every time. Sweeping the number of backward Euler "
         "steps to a fixed end time shows how each solver's reverse mode stores the "
         "forward pass: a full tape grows with the number of steps, checkpointing trades "
-        "that memory for recomputation. Diffusion is contractive, so the gradient stays "
-        "well conditioned at any horizon, and a failure here comes from memory or the "
-        "differentiation strategy rather than from the physics."
+        "that memory for recomputation. The end time is fixed and only the step count "
+        "grows, and diffusion is contractive, so the gradient stays well conditioned at "
+        "every step count and a failure here comes from memory or the differentiation "
+        "strategy rather than from the physics."
     ),
     bc_description=(
         "The thermal-mesh slab $[0,2]\\times[0,1]$ (one HEX8 layer, $L_z = L_x/n_x$), "
