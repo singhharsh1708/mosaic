@@ -121,3 +121,28 @@ def test_discrete_output_converges_to_the_continuum_one():
         errs.append(abs(d / c - 1))
     assert errs[0] > errs[1] > errs[2]
     assert errs[2] < 1e-3
+
+
+def test_transient_inputs_need_positive_dt():
+    from mosaic_shared.problems.thermal_transient import TransientFields
+
+    TransientFields(steps=0)  # steady: dt unused
+    TransientFields(steps=10, dt=np.array([0.1], dtype=np.float32))
+    for dt in (0.0, -0.1):
+        with pytest.raises(ValueError, match="positive dt"):
+            TransientFields(steps=10, dt=np.array([dt], dtype=np.float32))
+
+    # abstract_eval (used by tesseract-jax on every call) validates shapes, not values.
+    from mosaic_shared.problems.thermal_mesh import OutputSchema
+    from tesseract_core.runtime.schema_generation import create_abstract_eval_schema
+
+    abstract_inputs, _ = create_abstract_eval_schema(TransientFields, OutputSchema)
+    abstract_inputs.model_validate(
+        {
+            "inputs": {
+                "initial_temperature": {"shape": [5], "dtype": "float32"},
+                "dt": {"shape": [1], "dtype": "float32"},
+                "steps": 10,
+            }
+        }
+    )

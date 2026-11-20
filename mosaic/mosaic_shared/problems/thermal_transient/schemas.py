@@ -30,7 +30,7 @@ so an unsupported solver fails loudly instead of returning the steady answer.
 import numpy as np
 from mosaic_shared.problems.thermal_mesh import InputSchema as _ThermalInputSchema
 from mosaic_shared.problems.thermal_mesh import OutputSchema
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from tesseract_core.runtime import Array, Float32
 
 
@@ -56,6 +56,14 @@ class TransientFields(BaseModel):
             "steady problem (thermal-mesh)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_time_step(self) -> "TransientFields":
+        # Tesseract's abstract_eval validates this schema with ShapeDType placeholders,
+        # which carry no value, so only a concrete dt is checked.
+        if isinstance(self.dt, np.ndarray) and self.steps > 0 and not self.dt[0] > 0:
+            raise ValueError(f"steps = {self.steps} needs a positive dt, got {self.dt}")
+        return self
 
 
 class InputSchema(_ThermalInputSchema, TransientFields):
