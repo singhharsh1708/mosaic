@@ -84,9 +84,10 @@ def discrete_J_and_dJdk(
     c = V.T @ (Mx @ f0)
     k = conductivity(rho_0)
     dt = t_end / steps
-    q = 1.0 + dt * k * mu
-    a = c * q ** (-float(steps))
-    da_dk = c * (-float(steps)) * q ** (-float(steps) - 1) * dt * mu
+    # (1 + dt k mu)^-N as exp(-N log1p(dt k mu)): a power of the rounded 1 + dt k mu amplifies its rounding by N.
+    log_q = np.log1p(dt * k * mu)
+    a = c * np.exp(-float(steps) * log_q)
+    da_dk = c * (-float(steps)) * np.exp((-float(steps) - 1) * log_q) * dt * mu
     fN, dfN = V @ a, V @ da_dk
     w = (ny + 1) * (nz + 1)
     return w * float(fN @ fN), w * 2.0 * float(fN @ dfN)
