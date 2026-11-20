@@ -14,14 +14,13 @@ jobs:
   run:
     name: "thermal-transient | ${{ matrix.solver }}"
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         solver: [Firedrake, FEniCS]
     env:
-      # The long horizon points should end on memory, not on the 20-minute default per call.
-      MOSAIC_TESSERACT_TIMEOUT: "5400"
+      # mosaic's default per-call timeout (20 minutes): the default suite must fit #375's CI budget.
       EXPERIMENTS: >-
         forward/agreement forward/baseline gradient/fd_check
         gradient/analytic_check/tape gradient/analytic_check/checkpoint
