@@ -48,15 +48,6 @@ metadata:
             evidence: >
               https://github.com/pasteurlabs/mosaic/issues/180 (comment by the
               FEniCS developer who proposed the change); merged in #182.
-          heat-transient:
-            consequences: [out-of-memory]
-            symptom: >
-              The time loop factorises its matrix once with MUMPS (an LUSolver),
-              for the same reason as the steady solve.
-            notes: >
-              The transient solve in tesseract_api.py; UMFPACK was not tried on
-              this setup.
-            evidence: "As for heat: #180, #182."
         provenance: maintainer-authored
       - id: mumps-adjoint-monkeypatch
         title: Patches dolfin-adjoint to solve the adjoint with MUMPS
@@ -78,14 +69,6 @@ metadata:
             evidence: >
               https://github.com/pasteurlabs/mosaic/issues/180 (comment by the
               FEniCS developer who proposed the patch); merged in #182.
-          heat-transient:
-            consequences: [out-of-memory]
-            symptom: >
-              The adjoint of every time step goes through the same patched
-              linear solve, so the reason above applies per step.
-            notes: >
-              Same code path as heat; not measured separately on this setup.
-            evidence: "As for heat: #180, #182."
         upstream: >
           Not filed: legacy dolfin-adjoint has had no release since 2019.1.0.
           Per #182, newer dolfin-adjoint passes linear_solver to the adjoint

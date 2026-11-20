@@ -105,7 +105,7 @@ problem = Problem(
         "forward": [median_k(3.0, floor=1e-5)],
         "cost": [max_peer_k(20.0)],
         # Peer checks cannot single out one of two solvers, so each check also has
-        # an absolute bound (measured: 1.2e-4 at the best step size).
+        # an absolute bound (measured: 1.4e-5 median at the best step size).
         "gradient/fd_check": [
             min_cosine(0.99),
             rel_err_peer_outlier(50.0),
@@ -207,13 +207,15 @@ problem.add_experiment(
     reference=discrete_dloss_drho_uniform,
     plot=plot_analytic_check,
     # Provisional, measured on Firedrake and FEniCS (2e-9 to 3e-8, float32 round-off).
-    # A continuous adjoint is O(dt) off (about 10% at 10 steps), so the tight bound is
-    # judged at the longest horizon, where O(dt) is about 1e-4 and a wrong gradient is
-    # not; the loose one applies at every step count.
+    # A continuous adjoint is O(dt) off, about 10% at 10 steps, so the bound at each
+    # step count follows dt: an O(dt) adjoint passes and a wrong gradient does not,
+    # whichever points are present.
     status_check=[
         median_k(3.0, floor=1e-5),
+        max_error(0.2, at=10),
+        max_error(0.02, at=100),
+        max_error(2e-3, at=1000),
         max_error(1e-3, at=10000),
-        max_error(0.2),
     ],
 )
 problem.add_experiment(

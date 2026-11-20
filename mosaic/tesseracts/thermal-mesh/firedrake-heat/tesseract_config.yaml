@@ -60,9 +60,13 @@ metadata:
             consequences: [incorrect-gradient]
             symptom: >
               The transient output is the same nodal sum, of the final
-              temperature, so its derivative is seeded the same way.
+              temperature, so its derivative has to be seeded by hand as on
+              heat.
             notes: >
-              Same code path as heat; not measured separately on this setup.
+              The transient solve seeds one adjoint sweep with the misfit and
+              the compliance cotangents together (a cofunction at the final
+              temperature), so both outputs share one sweep. Not measured
+              without the seed on this setup.
             evidence: "As for heat: #162, #167, #184, #229."
         provenance: contributor
     deviations: []
