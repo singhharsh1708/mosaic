@@ -51,11 +51,11 @@ metadata:
           heat-transient:
             consequences: [out-of-memory]
             symptom: >
-              Each time step solves with the same MUMPS parameters as the steady
-              solve, so the reason above applies per step.
+              The time loop factorises its matrix once with MUMPS (an LUSolver),
+              for the same reason as the steady solve.
             notes: >
-              Same code path as heat (the transient solve in tesseract_api.py);
-              UMFPACK was not tried on this setup.
+              The transient solve in tesseract_api.py; UMFPACK was not tried on
+              this setup.
             evidence: "As for heat: #180, #182."
         provenance: maintainer-authored
       - id: mumps-adjoint-monkeypatch

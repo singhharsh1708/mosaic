@@ -668,9 +668,9 @@ def _transient_heat(
         (T_{n+1} - T_n, v) + dt (k(rho) grad T_{n+1}, grad v) = dt (f, v) + dt (q_n, v)_{Gamma_N}
 
     with the compliance and the identification error of the final temperature.
-    Legacy dolfin-adjoint keeps every step on its tape (it has no checkpointing), and
-    each step's solve factorises the matrix again. The tape is recorded only when a
-    gradient is asked for (L = c_C C + c_I I).
+    Legacy dolfin-adjoint keeps every step on its tape (it has no checkpointing). The
+    matrix is factorised once. The tape is recorded only when a gradient is asked for
+    (L = c_C C + c_I I).
     """
     key = _setup_cache_key(pts, cells, dm, dv, vm, vv, 0.0, 0.0, np.zeros(0))
     if key not in _TRANSIENT_MESH_CACHE:
@@ -729,9 +729,19 @@ def _transient_heat(
             DirichletBC(V, Constant(float(dv[k, 0])), m["dirichlet"], k + 1)
             for k in range(dv.shape[0])
         ]
+        # The matrix does not change over the steps: assemble and factorise it once
+        # (as firedrake-heat does with constant_jacobian), so a step costs a
+        # right-hand side and a pair of triangular solves.
+        A = assemble(a)
+        for bc in bcs:
+            bc.apply(A)
+        lu = LUSolver(A, "mumps")
         T_new = Function(V)
         for _ in range(steps):
-            solve(a == L, T_new, bcs, solver_parameters={"linear_solver": "mumps"})
+            b_vec = assemble(L)
+            for bc in bcs:
+                bc.apply(b_vec)
+            lu.solve(T_new.vector(), b_vec)
             T_old.assign(T_new)
         C = assemble(flux)
 
