@@ -136,6 +136,13 @@ problem.add_ic(
 
 _SLAB = {"ny": None, "nz": 1, "Lx": 2.0, "Ly": 1.0, "rho_0": 0.5}
 
+# The default sweep stops at 1e4 steps so that each solver's whole problem stays inside
+# mosaic#375's CI budget (about 30 minutes per solver): on standard GitHub runners 1e4
+# steps already separates the full tapes (1040 and 921 MiB) from Revolve (396 MiB),
+# while a 1e5-step gradient alone takes 22 to 68 minutes. Append 100000 to run the top of
+# the sweep (6568 to 8865 MiB for the tapes, about 995 MiB for Revolve) outside CI.
+_HORIZON_STEPS = [10, 100, 1000, 10000]
+
 # Forward
 problem.add_experiment(
     "forward/agreement",
@@ -226,20 +233,20 @@ problem.add_experiment(
     plot_description=(
         "Per-solver rollout limits: the step count at first failure (out of memory, "
         "timeout), and wall time and peak memory per successful VJP, from 10 to "
-        "$10^5$ steps to a fixed end time."
+        "$10^4$ steps to a fixed end time ($10^5$ outside CI, see the config)."
     ),
     ic={"name": "uniform", "seed": 0},
     runs=[
         {
             "name": "tape",
-            "physics": {**_SLAB, "nx": 32, "steps": [10, 100, 1000, 10000, 100000]},
+            "physics": {**_SLAB, "nx": 32, "steps": _HORIZON_STEPS},
         },
         {
             "name": "checkpoint",
             "physics": {
                 **_SLAB,
                 "nx": 32,
-                "steps": [10, 100, 1000, 10000, 100000],
+                "steps": _HORIZON_STEPS,
                 "adjoint_checkpoints": "sqrt",
             },
         },
@@ -268,7 +275,8 @@ problem.add_experiment(
         },
         {
             "name": "by_steps",
-            "physics": {**_SLAB, "nx": 32, "steps": [10, 100, 1000, 10000]},
+            # Three timed trials each; 1e4 steps alone took 8 to 24 minutes per solver.
+            "physics": {**_SLAB, "nx": 32, "steps": [10, 100, 1000]},
             "cost": {"n_trials": 3},
         },
     ],
