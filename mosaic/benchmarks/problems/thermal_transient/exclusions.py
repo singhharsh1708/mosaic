@@ -3,10 +3,12 @@
 
 """Per-solver exclusions for thermal-transient.
 
-Only Firedrake implements the time loop so far (``steps > 0`` in its thermal-mesh
-tesseract). The other thermal-mesh tesseracts reject the transient fields, so they
-are listed here as not implemented rather than left to fail; deal.II's gradient
-experiments are categorically out, as in thermal-mesh, since it has no AD path.
+Firedrake and FEniCS implement the time loop (``steps > 0`` in their thermal-mesh
+tesseracts); FEniCS's legacy dolfin-adjoint has no checkpointing, so it runs only the
+full-tape side of the horizon sweep. The other thermal-mesh tesseracts reject the
+transient fields, so they are listed here as not implemented rather than left to
+fail; deal.II's gradient experiments are categorically out, as in thermal-mesh,
+since it has no AD path.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ NO_CHECKPOINTING = Exclusion(
     "This tesseract has no adjoint checkpointing option, so only the full-tape run applies.",
 )
 
-_UNPORTED = ("fenics_heat", "jax_fem", "torch_fem_thermal")
+_UNPORTED = ("jax_fem", "torch_fem_thermal")
 
 
 def register(problem: Problem) -> None:
@@ -40,3 +42,6 @@ def register(problem: Problem) -> None:
     problem.exclude("cost/temporal_cost", {"dealii_heat": NO_TIME_LOOP})
     problem.exclude("cost/vjp_cost", {"dealii_heat": DEALII_NO_VJP})
     problem.exclude("gradient", {"dealii_heat": DEALII_NO_VJP})
+    problem.exclude(
+        "gradient/horizon_sweep_limits/checkpoint", {"fenics_heat": NO_CHECKPOINTING}
+    )
