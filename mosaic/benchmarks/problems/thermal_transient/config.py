@@ -11,8 +11,9 @@ is J = sum over nodes of T(t_end)^2 (``identification_error`` with a zero target
 
 The point of the problem is the time axis that thermal-mesh does not have: a
 sweep over the number of steps to a fixed end time exposes how each solver's
-reverse mode stores the forward pass (a full tape grows with the step count,
-checkpointing does not), with references that do not depend on the peers:
+reverse mode stores the forward pass (a full tape grows with the step count;
+checkpointing grows far more slowly, trading memory for recomputation), with
+references that do not depend on the peers:
 
 - the exact discrete solution of the scheme every solver implements here (trilinear
   hexahedra, backward Euler), for the forward value and for the gradient along a
