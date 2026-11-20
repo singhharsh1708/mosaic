@@ -29,6 +29,7 @@ from mosaic.benchmarks.core.config import Problem, SolverSpec, discover_solvers
 from mosaic.benchmarks.core.status_checks import (
     max_error,
     max_peer_k,
+    max_rel_err,
     median_k,
     min_cosine,
     rel_err_peer_outlier,
@@ -103,7 +104,13 @@ problem = Problem(
     status_checks={
         "forward": [median_k(3.0, floor=1e-5)],
         "cost": [max_peer_k(20.0)],
-        "gradient/fd_check": [min_cosine(0.99), rel_err_peer_outlier(50.0)],
+        # Peer checks cannot single out one of two solvers, so each check also has
+        # an absolute bound (measured: 1.2e-4 at the best step size).
+        "gradient/fd_check": [
+            min_cosine(0.99),
+            rel_err_peer_outlier(50.0),
+            max_rel_err(1e-2),
+        ],
     },
 )
 
@@ -139,6 +146,9 @@ problem.add_experiment(
     physics={**_SLAB, "nx": 16, "steps": [10, 100, 1000]},
     reference=discrete_output,
     plot=plot_agreement,
+    # Against the exact discrete solution the error is float32 round-off (measured
+    # 1e-8 to 2e-8), so an absolute bound singles out a wrong solver even with two.
+    status_check=[median_k(3.0, floor=1e-5), max_error(1e-6)],
 )
 problem.add_experiment(
     "forward/baseline",
@@ -174,18 +184,37 @@ problem.add_experiment(
     plot_description=(
         "Relative error of the gradient of $J^2$ summed over the cells (the derivative "
         "along a uniform change in density) against its exact value for the discrete "
-        "scheme, over the number of steps: the differentiation error alone."
+        "scheme, over the number of steps, with the full tape and with checkpointing: "
+        "the differentiation error alone."
     ),
     ic={"name": "uniform", "seed": 0},
-    physics={**_SLAB, "nx": 16, "steps": [10, 100, 1000, 10000]},
+    runs=[
+        {
+            "name": "tape",
+            "physics": {**_SLAB, "nx": 16, "steps": [10, 100, 1000, 10000]},
+        },
+        {
+            "name": "checkpoint",
+            "physics": {
+                **_SLAB,
+                "nx": 16,
+                "steps": [10, 100, 1000, 10000],
+                "adjoint_checkpoints": "sqrt",
+            },
+        },
+    ],
     wrt="rho",
     reference=discrete_dloss_drho_uniform,
     plot=plot_analytic_check,
-    # Provisional, measured on Firedrake only. A discrete adjoint matches the
-    # reference to float32 round-off at every step count. A continuous adjoint
-    # is O(dt) off (about 10% at 10 steps), so the bound is judged at the
-    # longest horizon, where O(dt) is about 1e-4 and a wrong gradient is not.
-    status_check=[median_k(3.0, floor=1e-5), max_error(1e-3, at=10000)],
+    # Provisional, measured on Firedrake and FEniCS (2e-9 to 3e-8, float32 round-off).
+    # A continuous adjoint is O(dt) off (about 10% at 10 steps), so the tight bound is
+    # judged at the longest horizon, where O(dt) is about 1e-4 and a wrong gradient is
+    # not; the loose one applies at every step count.
+    status_check=[
+        median_k(3.0, floor=1e-5),
+        max_error(1e-3, at=10000),
+        max_error(0.2),
+    ],
 )
 problem.add_experiment(
     "gradient/horizon_sweep_limits",
@@ -226,8 +255,13 @@ problem.add_experiment(
 problem.add_experiment(
     "cost/vjp_cost",
     vjp_cost,
-    plot_description="VJP wall-clock time against the number of steps.",
+    plot_description="VJP wall-clock time against mesh size and against the number of steps.",
     runs=[
+        {
+            "name": "by_N",
+            "physics": {**_SLAB, "nx": [8, 16, 32, 64], "steps": 100},
+            "cost": {"n_trials": 3},
+        },
         {
             "name": "by_steps",
             "physics": {**_SLAB, "nx": 32, "steps": [10, 100, 1000, 10000]},

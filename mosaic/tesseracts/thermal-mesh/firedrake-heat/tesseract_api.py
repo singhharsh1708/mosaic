@@ -498,9 +498,13 @@ def _transient_heat(
     n_cells = len(cells)
     steps = int(inputs.steps)
 
+    # The tape is recorded only when a gradient is asked for, so a forward-only call
+    # costs the forward solve alone.
+    want_gradient = cot_compliance != 0.0 or cot_id_error != 0.0
+    checkpointed = want_gradient and inputs.adjoint_checkpoints is not None
     tape = Tape()
     set_working_tape(tape)
-    if inputs.adjoint_checkpoints is not None:
+    if checkpointed:
         from checkpoint_schedules import MultistageCheckpointSchedule
 
         tape.enable_checkpointing(
@@ -508,7 +512,10 @@ def _transient_heat(
                 steps, min(inputs.adjoint_checkpoints, steps), 0
             )
         )
-    continue_annotation()
+    if want_gradient:
+        continue_annotation()
+    else:
+        pause_annotation()
 
     rho_fn = Function(DG0, name="rho")
     rho_fn.dat.data[:] = np.clip(
@@ -547,16 +554,12 @@ def _transient_heat(
         LinearVariationalProblem(a, L, T_new, bcs=bcs, constant_jacobian=True),
         solver_parameters=_SOLVER_PARAMETERS,
     )
-    loop = (
-        range(steps)
-        if inputs.adjoint_checkpoints is None
-        else tape.timestepper(iter(range(steps)))
-    )
+    loop = tape.timestepper(iter(range(steps))) if checkpointed else range(steps)
     for _ in loop:
         solver.solve()
         T_old.assign(T_new)
-    C = assemble(flux)
     pause_annotation()
+    C = assemble(flux)
 
     # mosaic-intervention: nodal-misfit-seed
     T_fd = T_old.dat.data_ro.copy()
@@ -568,19 +571,22 @@ def _transient_heat(
     # mosaic-intervention-end: nodal-misfit-seed
 
     d_rho, d_source = np.zeros(n_cells), np.zeros(n_cells)
-    controls = [Control(rho_fn), Control(source_fn)]
-    if cot_compliance != 0.0:
-        g = ReducedFunctional(C, controls, tape=tape).derivative()
-        d_rho[fd_cells] += cot_compliance * g[0].dat.data_ro
-        d_source[fd_cells] += cot_compliance * g[1].dat.data_ro
-    if cot_id_error != 0.0:
+    if want_gradient:
+        # One adjoint sweep for L = c_C C + c_I I, seeded at the final temperature:
+        # C is linear in it (dC/dT = (q_n, v)_{Gamma_N}) and I is the nodal misfit.
+        # (A checkpointed tape allows one sweep per recording, so the two outputs
+        # cannot take separate sweeps.)
+        dC_dT = assemble(derivative(flux, T_old))
+        seed = Cofunction(V.dual())
         # mosaic-intervention: nodal-misfit-seed
-        dI_dT = Cofunction(V.dual())
-        dI_dT.dat.data[:] = 2.0 * misfit
-        g = ReducedFunctional(T_old, controls, tape=tape).derivative(adj_input=dI_dT)
+        seed.dat.data[:] = (
+            cot_id_error * 2.0 * misfit + cot_compliance * dC_dT.dat.data_ro
+        )
         # mosaic-intervention-end: nodal-misfit-seed
-        d_rho[fd_cells] += cot_id_error * g[0].dat.data_ro
-        d_source[fd_cells] += cot_id_error * g[1].dat.data_ro
+        controls = [Control(rho_fn), Control(source_fn)]
+        g = ReducedFunctional(T_old, controls, tape=tape).derivative(adj_input=seed)
+        d_rho[fd_cells] = g[0].dat.data_ro
+        d_source[fd_cells] = g[1].dat.data_ro
     tape.clear_tape()
     return float(C), I_val, d_rho, d_source
 

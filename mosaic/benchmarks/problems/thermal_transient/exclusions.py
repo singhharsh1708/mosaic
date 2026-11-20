@@ -42,6 +42,8 @@ def register(problem: Problem) -> None:
     problem.exclude("cost/temporal_cost", {"dealii_heat": NO_TIME_LOOP})
     problem.exclude("cost/vjp_cost", {"dealii_heat": DEALII_NO_VJP})
     problem.exclude("gradient", {"dealii_heat": DEALII_NO_VJP})
-    problem.exclude(
-        "gradient/horizon_sweep_limits/checkpoint", {"fenics_heat": NO_CHECKPOINTING}
-    )
+    for key in (
+        "gradient/horizon_sweep_limits/checkpoint",
+        "gradient/analytic_check/checkpoint",
+    ):
+        problem.exclude(key, {"fenics_heat": NO_CHECKPOINTING})

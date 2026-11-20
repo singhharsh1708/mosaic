@@ -56,5 +56,13 @@ metadata:
               be written in UFL, which Firedrake's custom quadrature may allow,
               was not checked.
             evidence: "#162; #167, summary; #184; current form from #229."
+          heat-transient:
+            consequences: [incorrect-gradient]
+            symptom: >
+              The transient output is the same nodal sum, of the final
+              temperature, so its derivative is seeded the same way.
+            notes: >
+              Same code path as heat; not measured separately on this setup.
+            evidence: "As for heat: #162, #167, #184, #229."
         provenance: contributor
     deviations: []
