@@ -12,6 +12,7 @@ CRITICAL import order: dolfin_adjoint must immediately follow dolfin so that
 it can monkey-patch solve/assemble and record operations on the adjoint tape.
 """
 
+import contextlib
 import hashlib
 import os
 import tempfile
@@ -48,6 +49,7 @@ from mosaic_shared.problems.thermal_mesh import (
 from mosaic_shared.problems.thermal_mesh import (
     OutputSchema as _CanonicalOutputSchema,
 )
+from mosaic_shared.problems.thermal_transient import TransientFields
 from mosaic_shared.schema_types import make_differentiable
 
 try:
@@ -62,8 +64,14 @@ from scipy.spatial import cKDTree
 from tesseract_core.runtime import ShapeDType
 
 
-class InputSchema(make_differentiable(_CanonicalInputSchema, ["rho", "source"])):
-    """Inputs for FEniCS heat solver, extended with material parameters."""
+class InputSchema(
+    make_differentiable(_CanonicalInputSchema, ["rho", "source"]), TransientFields
+):
+    """Inputs for FEniCS heat solver, extended with material parameters.
+
+    With ``steps > 0`` (thermal-transient) the solver takes ``steps`` backward Euler
+    steps of size ``dt`` from ``initial_temperature`` instead of the steady solve.
+    """
 
     k_max: float = Field(
         default=1.0,
@@ -636,6 +644,156 @@ def _solve_forward(
 
 
 # ---------------------------------------------------------------------------
+# Transient solve (thermal-transient: steps > 0)
+# ---------------------------------------------------------------------------
+
+_TRANSIENT_MESH_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _transient_heat(
+    inputs: "InputSchema",
+    pts: np.ndarray,
+    cells: np.ndarray,
+    dm: np.ndarray,
+    dv: np.ndarray,
+    vm: np.ndarray,
+    vv: np.ndarray,
+    cot_compliance: float = 0.0,
+    cot_id_error: float = 0.0,
+) -> tuple[float, float, np.ndarray, np.ndarray]:
+    """Backward Euler from the initial temperature; returns (C, I, dL/drho, dL/dsource).
+
+    The same scheme as firedrake-heat's transient solve:
+
+        (T_{n+1} - T_n, v) + dt (k(rho) grad T_{n+1}, grad v) = dt (f, v) + dt (q_n, v)_{Gamma_N}
+
+    with the compliance and the identification error of the final temperature.
+    Legacy dolfin-adjoint keeps every step on its tape (it has no checkpointing). The
+    matrix is factorised once. The tape is recorded only when a gradient is asked for
+    (L = c_C C + c_I I).
+    """
+    key = _setup_cache_key(pts, cells, dm, dv, vm, vv, 0.0, 0.0, np.zeros(0))
+    if key not in _TRANSIENT_MESH_CACHE:
+        _TRANSIENT_MESH_CACHE.clear()
+        mesh = _build_fenics_mesh(pts, cells)
+        V = FunctionSpace(mesh, "CG", 1)
+        _TRANSIENT_MESH_CACHE[key] = {
+            "mesh": mesh,
+            "V": V,
+            "DG0": FunctionSpace(mesh, "DG", 0),
+            "fenics_to_input": _cell_reorder_map(pts, cells, mesh),
+            "d2v": dof_to_vertex_map(V),
+            "neumann": _mark_neumann_facets(mesh, vm),
+            "dirichlet": _mark_neumann_facets(mesh, dm),
+        }
+    m = _TRANSIENT_MESH_CACHE[key]
+    V, DG0, f2i, d2v = m["V"], m["DG0"], m["fenics_to_input"], m["d2v"]
+    n_cells = len(cells)
+    steps = int(inputs.steps)
+    want_gradient = cot_compliance != 0.0 or cot_id_error != 0.0
+
+    set_working_tape(Tape())
+    with contextlib.nullcontext() if want_gradient else stop_annotating():
+        rho_fn = Function(DG0, name="rho")
+        rho_fn.vector()[:] = np.clip(
+            np.asarray(inputs.rho[:n_cells], dtype=np.float64)[f2i], 0.0, 1.0
+        )
+        source_fn = Function(DG0, name="source")
+        src = np.asarray(inputs.source, dtype=np.float64)
+        src_vals = np.zeros(len(f2i))
+        has_source = f2i < len(src)
+        src_vals[has_source] = src[f2i[has_source]]
+        source_fn.vector()[:] = src_vals
+
+        k_min = Constant(1e-3 * inputs.k_max)
+        k_simp = k_min + (Constant(inputs.k_max) - k_min) * rho_fn**inputs.p_exp
+        dt = Constant(float(np.asarray(inputs.dt)[0]))
+
+        T0 = np.asarray(inputs.initial_temperature, dtype=np.float64)
+        t0 = np.zeros(V.dim())
+        known = d2v < len(T0)
+        t0[known] = T0[d2v[known]]
+        T_old = Function(V, name="T")
+        T_old.vector()[:] = t0
+
+        ds_N = Measure("ds", domain=m["mesh"], subdomain_data=m["neumann"])
+        T, v = TrialFunction(V), TestFunction(V)
+        a = T * v * dx + dt * inner(k_simp * grad(T), grad(v)) * dx
+        L = T_old * v * dx + dt * source_fn * v * dx
+        flux = Constant(0.0) * T_old * dx
+        for k in range(vv.shape[0]):
+            q_n = Constant(float(vv[k, 0]))
+            L = L + dt * q_n * v * ds_N(k + 1)
+            flux = flux + q_n * T_old * ds_N(k + 1)
+        bcs = [
+            DirichletBC(V, Constant(float(dv[k, 0])), m["dirichlet"], k + 1)
+            for k in range(dv.shape[0])
+        ]
+        # Dirichlet nodes take their prescribed values from t = 0 (the schema's
+        # contract), whatever initial_temperature holds there.
+        with stop_annotating():
+            for bc in bcs:
+                bc.apply(T_old.vector())
+        # The matrix does not change over the steps: assemble and factorise it once
+        # (as firedrake-heat does with constant_jacobian), so a step costs a
+        # right-hand side and a pair of triangular solves.
+        A = assemble(a)
+        for bc in bcs:
+            bc.apply(A)
+        lu = LUSolver(A, "mumps")
+        T_new = Function(V)
+        for _ in range(steps):
+            b_vec = assemble(L)
+            for bc in bcs:
+                bc.apply(b_vec)
+            lu.solve(T_new.vector(), b_vec)
+            T_old.assign(T_new)
+        C = assemble(flux)
+
+        T_tgt = np.asarray(inputs.target_temperature, dtype=np.float64)
+        has_target = d2v < len(T_tgt)
+        target_at_dofs = np.zeros(V.dim())
+        target_at_dofs[has_target] = T_tgt[d2v[has_target]]
+        # mosaic-intervention: nodal-misfit-block
+        I_err = nodal_squared_error(
+            T_old, target_at_dofs, has_target.astype(np.float64)
+        )
+        # mosaic-intervention-end: nodal-misfit-block
+
+    d_rho, d_source = np.zeros(n_cells), np.zeros(n_cells)
+    controls = [Control(rho_fn), Control(source_fn)] if want_gradient else []
+    for cot, functional in ((cot_compliance, C), (cot_id_error, I_err)):
+        if cot != 0.0:
+            g_rho, g_source = ReducedFunctional(functional, controls).derivative()
+            d_rho[f2i] += cot * g_rho.vector().get_local()
+            d_source[f2i] += cot * g_source.vector().get_local()
+    C_val, I_val = float(C), float(I_err)
+    get_working_tape().clear_tape()
+    return C_val, I_val, d_rho, d_source
+
+
+def _bc_arrays(inputs: "InputSchema"):
+    """(pts, cells, dirichlet mask, dirichlet values, neumann mask, neumann values)."""
+    hm = inputs.hex_mesh
+    bc = inputs.boundary_conditions
+    return (
+        np.asarray(hm.points[: hm.n_points], dtype=np.float64),
+        np.asarray(hm.faces[: hm.n_faces], dtype=np.int64),
+        np.asarray(bc.dirichlet.mask if bc.dirichlet else []),
+        np.asarray(
+            bc.dirichlet.values
+            if bc.dirichlet and bc.dirichlet.values is not None
+            else np.zeros((0, 1)),
+            dtype=np.float64,
+        ),
+        np.asarray(bc.neumann.mask if bc.neumann else []),
+        np.asarray(
+            bc.neumann.values if bc.neumann else np.zeros((0, 1)), dtype=np.float64
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tesseract endpoints
 # ---------------------------------------------------------------------------
 
@@ -651,6 +809,12 @@ def apply(inputs: InputSchema) -> OutputSchema:
         OutputSchema with thermal_compliance and identification_error, both
         scalars, from a single replay of the tape.
     """
+    if inputs.steps > 0:
+        C, I_val, _, _ = _transient_heat(inputs, *_bc_arrays(inputs))
+        return OutputSchema(
+            thermal_compliance=np.float32(C), identification_error=np.float32(I_val)
+        )
+
     hm = inputs.hex_mesh
     pts = np.asarray(hm.points[: hm.n_points], dtype=np.float64)
     cells = np.asarray(hm.faces[: hm.n_faces], dtype=np.int64)
@@ -727,6 +891,28 @@ def vector_jacobian_product(
 
     if not want_rho and not want_source:
         return {}
+
+    if inputs.steps > 0:
+        n = inputs.hex_mesh.n_faces
+        _, _, d_rho, d_source = _transient_heat(
+            inputs,
+            *_bc_arrays(inputs),
+            cot_compliance=float(cotangent_vector.get("thermal_compliance", 0.0)),
+            cot_id_error=float(cotangent_vector.get("identification_error", 0.0)),
+        )
+        result = {}
+        if want_rho:
+            result["rho"] = np.zeros(len(np.asarray(inputs.rho)), dtype=np.float32)
+            result["rho"][:n] = d_rho.astype(np.float32)
+        if want_source:
+            # A source shorter than the cell count has no entries for the rest of the
+            # cells (the forward reads them as zero), so only its own length is returned.
+            n_src = len(np.asarray(inputs.source))
+            result["source"] = np.zeros(n_src, dtype=np.float32)
+            result["source"][: min(n, n_src)] = d_source[: min(n, n_src)].astype(
+                np.float32
+            )
+        return result
 
     hm = inputs.hex_mesh
     pts = np.asarray(hm.points[: hm.n_points], dtype=np.float64)

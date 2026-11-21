@@ -97,5 +97,13 @@ metadata:
               and conductivity_recovery_bfgs reached a final/initial misfit of
               0.02779 against 0.00020 with the nodal adjoint.
             evidence: "#167; #184, notes; comment above NodalSquaredErrorBlock."
+          heat-transient:
+            consequences: [cannot-express, incorrect-gradient]
+            symptom: >
+              The transient output is the same nodal sum, of the final
+              temperature, so it goes on the tape through the same block.
+            notes: >
+              Same code path as heat; not measured separately on this setup.
+            evidence: "As for heat: #167, #184."
         provenance: maintainer-authored
     deviations: []

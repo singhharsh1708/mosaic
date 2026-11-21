@@ -143,6 +143,9 @@ _UNGATED_BY_DESIGN: frozenset[str] = frozenset(
         "thermal-mesh/gradient/param_sweep",
         "thermal-mesh/gradient/source_width_sweep",
         "structural-mesh/gradient/param_sweep",
+        "thermal-transient/ics",
+        "thermal-transient/gradient/horizon_sweep_limits/tape",
+        "thermal-transient/gradient/horizon_sweep_limits/checkpoint",
     }
 )
 
