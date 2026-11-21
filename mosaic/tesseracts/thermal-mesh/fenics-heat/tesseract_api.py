@@ -905,10 +905,13 @@ def vector_jacobian_product(
             result["rho"] = np.zeros(len(np.asarray(inputs.rho)), dtype=np.float32)
             result["rho"][:n] = d_rho.astype(np.float32)
         if want_source:
-            result["source"] = np.zeros(
-                len(np.asarray(inputs.source)), dtype=np.float32
+            # A source shorter than the cell count has no entries for the rest of the
+            # cells (the forward reads them as zero), so only its own length is returned.
+            n_src = len(np.asarray(inputs.source))
+            result["source"] = np.zeros(n_src, dtype=np.float32)
+            result["source"][: min(n, n_src)] = d_source[: min(n, n_src)].astype(
+                np.float32
             )
-            result["source"][:n] = d_source.astype(np.float32)
         return result
 
     hm = inputs.hex_mesh

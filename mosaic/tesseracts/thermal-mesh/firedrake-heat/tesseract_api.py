@@ -722,10 +722,12 @@ def vector_jacobian_product(
             result["rho"] = np.zeros(len(np.asarray(inputs.rho)), dtype=np.float32)
             result["rho"][: hm.n_faces] = d_rho.astype(np.float32)
         if want_source:
-            result["source"] = np.zeros(
-                len(np.asarray(inputs.source)), dtype=np.float32
-            )
-            result["source"][: hm.n_faces] = d_source.astype(np.float32)
+            # A source shorter than the cell count has no entries for the rest of the
+            # cells (the forward reads them as zero), so only its own length is returned.
+            n_src = len(np.asarray(inputs.source))
+            n_copy = min(hm.n_faces, n_src)
+            result["source"] = np.zeros(n_src, dtype=np.float32)
+            result["source"][:n_copy] = d_source[:n_copy].astype(np.float32)
         return result
 
     _, _, entry = _replay_heat(
