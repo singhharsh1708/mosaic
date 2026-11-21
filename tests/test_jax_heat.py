@@ -140,3 +140,15 @@ def test_xla_memory_reports_the_tape_growing_with_steps():
     ckpt = api.xla_memory(_inputs(1000, adjoint_checkpoints="sqrt"))["temp"]
     assert tape[1] > 5 * tape[0]
     assert ckpt < tape[1] / 5
+
+
+def test_density_gradient_at_the_upper_bound_is_not_halved(tess):
+    # The other backends clip rho before it becomes a control, so their derivative at
+    # rho = 1 is the SIMP slope; jnp.clip's derivative would halve it there.
+    g = {}
+    for rho0 in (0.999, 1.0):
+        inputs = _inputs(1)
+        inputs["rho"] = np.full_like(np.asarray(inputs["rho"]), rho0)
+        J = float(tess.apply(inputs)["identification_error"])
+        g[rho0] = _grad_uniform(tess, inputs, J)
+    assert g[1.0] == pytest.approx(g[0.999], rel=5e-2)  # halving would be 50 % off

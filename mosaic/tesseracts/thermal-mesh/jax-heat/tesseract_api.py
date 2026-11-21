@@ -359,7 +359,10 @@ def _temperature(
 ) -> jax.Array:
     """Final nodal temperature: steady solve (steps == 0) or backward Euler."""
     n_cells, n = m["ke"].shape[0], m["free"].shape[0]
-    rho = jnp.clip(rho[:n_cells].astype(jnp.float64), 0.0, 1.0)
+    # Clip the value but not the derivative, as the other backends do (they clip before
+    # rho becomes a control): at rho = 1 jnp.clip's derivative would be one half.
+    rho = rho[:n_cells].astype(jnp.float64)
+    rho = rho + jax.lax.stop_gradient(jnp.clip(rho, 0.0, 1.0) - rho)
     k_min = 1e-3 * k_max
     k = k_min + (k_max - k_min) * rho**p_exp
     src = (
