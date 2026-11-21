@@ -1,0 +1,2 @@
+jax[cuda12]==0.12.1
+../../../mosaic_shared
