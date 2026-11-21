@@ -5,6 +5,8 @@ description: >
   (CG with a Jacobi preconditioner per step). Gradients via JAX reverse mode through the
   whole solve as one compiled XLA program, with a full tape or jax.checkpoint chunks.
 build_config:
+  # Ubuntu 24.04 ships Python 3.12, which jax 0.12.1 needs (as the jax-cfd image).
+  base_image: "nvidia/cuda:12.6.3-runtime-ubuntu24.04"
   package_data: []
 env:
   XLA_PYTHON_CLIENT_PREALLOCATE: "false"

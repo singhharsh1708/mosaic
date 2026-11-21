@@ -152,18 +152,22 @@ def main() -> None:
                     cmd, check=False, capture_output=True, text=True, timeout=a.timeout
                 )
                 lines = r.stdout.strip().splitlines()
-                res = (
-                    json.loads(lines[-1])
-                    if lines
-                    else {
+                try:
+                    res = json.loads(lines[-1]) if lines else None
+                except json.JSONDecodeError:
+                    res = None
+                if not isinstance(res, dict) or r.returncode != 0:
+                    # A worker killed by the runtime (e.g. out of device memory) may
+                    # print partial output or none; record it as a failure.
+                    res = {
                         "ok": False,
-                        "error": f"exit {r.returncode}: {r.stderr[-1000:]}",
+                        "error": f"exit {r.returncode}: {(r.stderr or r.stdout)[-1000:]}",
                     }
-                )
             except subprocess.TimeoutExpired:
                 res = {"ok": False, "error": f"timeout after {a.timeout} s"}
             res.setdefault("nx", nx)
             res.setdefault("steps", steps)
+            res.setdefault("checkpoints", a.checkpoints)
             print(json.dumps(res), flush=True)
             if a.out:
                 with open(a.out, "a") as fh:
