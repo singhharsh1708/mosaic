@@ -1,0 +1,88 @@
+# Fork-only: the thermal-transient gradient check, horizon sweep and cost experiments on GitHub's standard CPU
+# runners, for the solvers that implement the time loop. Not meant for upstream (it runs on push to its own branch).
+name: Fork thermal-transient sweep
+
+on:
+  push:
+    branches: [fork-ci/thermal-transient, fork-ci/all]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: "thermal-transient | ${{ matrix.solver }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        solver: [Firedrake, FEniCS, JAX, torch-fem]
+    env:
+      # mosaic's default per-call timeout (20 minutes): the default suite must fit #375's CI budget.
+      EXPERIMENTS: >-
+        forward/agreement forward/baseline gradient/fd_check
+        gradient/analytic_check/tape gradient/analytic_check/checkpoint
+        gradient/horizon_sweep_limits/tape gradient/horizon_sweep_limits/checkpoint
+        cost/temporal_cost cost/vjp_cost/by_N cost/vjp_cost/by_steps
+    steps:
+      - name: Free disk space (the Firedrake image is about 11 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af > /dev/null
+          df -h /
+
+      - uses: actions/checkout@v6
+
+      - uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install Mosaic
+        run: cp production.uv.lock uv.lock && uv sync --frozen
+
+      - name: Run the GPU-capable backends on this CPU runner (fork CI only)
+        # jax-heat and torch-fem declare uses_gpu (they use a GPU when present); the harness's
+        # CPU-only mode keeps only uses_gpu: false solvers, so mark them CPU here, in this checkout only.
+        run: |
+          sed -i 's/^    uses_gpu: true$/    uses_gpu: false/' \
+            mosaic/tesseracts/thermal-mesh/jax-heat/tesseract_config.yaml \
+            mosaic/tesseracts/thermal-mesh/torch-fem-thermal/tesseract_config.yaml
+          grep -n "uses_gpu" mosaic/tesseracts/thermal-mesh/{jax-heat,torch-fem-thermal}/tesseract_config.yaml
+
+      - name: Run
+        # Experiments with several runs are selected by their full name (suite/experiment/run).
+        run: |
+          for e in $EXPERIMENTS; do
+            echo "::group::$e"
+            uv run mosaic run -p thermal-transient -e "$e" -s "${{ matrix.solver }}" \
+              --hardware cpu --gpus none -o results --tb || true
+            echo "::endgroup::"
+          done
+
+      - name: Check that every experiment passed its status checks
+        # mosaic run exits 0 and writes result.json even when every solver call failed, so read the status table.
+        # FEniCS has no checkpointing and is excluded from the checkpoint runs ("excluded" passes).
+        env:
+          SOLVER: ${{ matrix.solver }}
+        run: |
+          uv run mosaic status -p thermal-transient -o results --format json > status.json
+          uv run python - status.json <<'PY'
+          import json, os, sys
+          solver, want = os.environ["SOLVER"], os.environ["EXPERIMENTS"].split()
+          rows = {r["label"]: r["cells"].get(solver, {})
+                  for r in json.load(open(sys.argv[1]))["problems"]["thermal-transient"]["rows"]}
+          bad = [(e, rows.get(e, {}).get("status", "not_run"), rows.get(e, {}).get("reason", ""))
+                 for e in want if rows.get(e, {}).get("status", "not_run") not in ("ok", "excluded")]
+          for e in want:
+              print(f"{rows.get(e, {}).get('status', 'not_run'):9} {e}")
+          for e, s, r in bad:
+              print(f"FAIL {s} {e}: {r[:200]}")
+          sys.exit(1 if bad else 0)
+          PY
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-${{ matrix.solver }}
+          path: results/
+          if-no-files-found: warn
