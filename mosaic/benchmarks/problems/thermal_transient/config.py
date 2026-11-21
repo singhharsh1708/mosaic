@@ -68,7 +68,13 @@ _TESSERACT_SLUG = "thermal-mesh"
 
 _SOLVERS: dict[str, SolverSpec] = discover_solvers(_TESSERACT_SLUG)
 apply_styles(_SOLVERS)
-for _key in ("fenics_heat", "dealii_heat", "firedrake_heat", "torch_fem_thermal"):
+for _key in (
+    "fenics_heat",
+    "dealii_heat",
+    "firedrake_heat",
+    "torch_fem_thermal",
+    "jax_heat",
+):
     if _key in _SOLVERS:
         _SOLVERS[_key].input_overrides = {"k_max": K_MAX, "p_exp": P_EXP}
 
