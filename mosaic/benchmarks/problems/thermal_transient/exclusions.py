@@ -5,10 +5,11 @@
 
 Firedrake and FEniCS implement the time loop (``steps > 0`` in their thermal-mesh
 tesseracts); FEniCS's legacy dolfin-adjoint has no checkpointing, so it runs only the
-full-tape side of the horizon sweep. The other thermal-mesh tesseracts reject the
-transient fields, so they are listed here as not implemented rather than left to
-fail; deal.II's gradient experiments are categorically out, as in thermal-mesh,
-since it has no AD path.
+full-tape side of the horizon sweep. torch-fem implements it too (an iterative
+backend: warm-started CG to ``cg_rtol``, implicit or unrolled adjoint) but is not
+registered until it has run through the harness in CI. JAX-FEM rejects the transient fields, so it
+is listed here as not implemented rather than left to fail; deal.II's gradient
+experiments are categorically out, as in thermal-mesh, since it has no AD path.
 """
 
 from __future__ import annotations
@@ -26,18 +27,24 @@ NO_TIME_LOOP = Exclusion(
     "This thermal-mesh tesseract has no time loop yet: it does not accept the "
     "thermal-transient fields (initial_temperature, dt, steps).",
 )
+NOT_REGISTERED = Exclusion(
+    ExclusionCategory.NOT_IMPLEMENTED,
+    "The time loop is implemented (steps > 0, cg_rtol, adjoint_mode) but not yet "
+    "registered here: it has not yet run through the harness in CI.",
+)
 NO_CHECKPOINTING = Exclusion(
     ExclusionCategory.NOT_IMPLEMENTED,
     "This tesseract has no adjoint checkpointing option, so only the full-tape run applies.",
 )
 
-_UNPORTED = ("jax_fem", "torch_fem_thermal")
+_UNPORTED = ("jax_fem",)
 
 
 def register(problem: Problem) -> None:
     """Attach per-solver exclusions; called once from ``config.py``."""
     for suite in ("forward", "gradient", "cost"):
         problem.exclude(suite, {k: NO_TIME_LOOP for k in _UNPORTED})
+        problem.exclude(suite, {"torch_fem_thermal": NOT_REGISTERED})
     problem.exclude("forward", {"dealii_heat": NO_TIME_LOOP})
     problem.exclude("cost/temporal_cost", {"dealii_heat": NO_TIME_LOOP})
     problem.exclude("cost/vjp_cost", {"dealii_heat": DEALII_NO_VJP})
