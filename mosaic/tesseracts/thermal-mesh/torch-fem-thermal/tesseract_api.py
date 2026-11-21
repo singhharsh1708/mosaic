@@ -296,6 +296,7 @@ def _forward_torchfem(
 # element by element; Dirichlet nodes are held at their prescribed values.
 
 
+# mosaic-intervention: transient-backward-euler
 class _StepOperator:
     """A = M + dt sum_e w_e k_e restricted to the free nodes, element by element."""
 
@@ -495,6 +496,7 @@ def _transient_torchfem(
             x = _ImplicitStep.apply(w, b, x0, op, rtol)
         T = g + x
     return T, heat_flux_base
+    # mosaic-intervention-end: transient-backward-euler
 
 
 def _apply_core(inputs_dict: dict, want_grad: bool) -> dict:
