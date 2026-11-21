@@ -200,14 +200,14 @@ problem.add_experiment(
     runs=[
         {
             "name": "tape",
-            "physics": {**_SLAB, "nx": 16, "steps": [10, 100, 1000, 10000]},
+            "physics": {**_SLAB, "nx": 16, "steps": [10, 100, 1000]},
         },
         {
             "name": "checkpoint",
             "physics": {
                 **_SLAB,
                 "nx": 16,
-                "steps": [10, 100, 1000, 10000],
+                "steps": [10, 100, 1000],
                 "adjoint_checkpoints": "sqrt",
             },
         },
@@ -217,15 +217,15 @@ problem.add_experiment(
     plot=plot_analytic_check,
     # Provisional, measured on Firedrake and FEniCS (2e-9 to 3e-8, float32 round-off).
     # A continuous adjoint is O(dt) off, about 10% at 10 steps, so the absolute bound at
-    # each step count follows dt (down to a 1e-3 floor) and an error above it fails. The
-    # peer-median check still flags an O(dt) adjoint scored against exact discrete peers;
-    # whether it should is open.
+    # each step count follows dt and an error above it fails. The peer-median check still
+    # flags an O(dt) adjoint scored against exact discrete peers; whether it should is
+    # open. Up to 1e3 steps only: the horizon sweep already runs 1e4, and repeating it
+    # here cost 5 to 8 minutes per solver of the CI budget.
     status_check=[
         median_k(3.0, floor=1e-5),
         max_error(0.2, at=10),
         max_error(0.02, at=100),
         max_error(2e-3, at=1000),
-        max_error(1e-3, at=10000),
     ],
 )
 problem.add_experiment(
