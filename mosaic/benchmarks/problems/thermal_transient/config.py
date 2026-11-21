@@ -216,9 +216,10 @@ problem.add_experiment(
     reference=discrete_dloss_drho_uniform,
     plot=plot_analytic_check,
     # Provisional, measured on Firedrake and FEniCS (2e-9 to 3e-8, float32 round-off).
-    # A continuous adjoint is O(dt) off, about 10% at 10 steps, so the bound at each
-    # step count follows dt: an O(dt) adjoint passes and a wrong gradient does not,
-    # whichever points are present.
+    # A continuous adjoint is O(dt) off, about 10% at 10 steps, so the absolute bound at
+    # each step count follows dt (down to a 1e-3 floor) and an error above it fails. The
+    # peer-median check still flags an O(dt) adjoint scored against exact discrete peers;
+    # whether it should is open.
     status_check=[
         median_k(3.0, floor=1e-5),
         max_error(0.2, at=10),
