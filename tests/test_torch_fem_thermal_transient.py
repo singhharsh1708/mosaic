@@ -150,3 +150,14 @@ def test_abstract_eval_accepts_transient_inputs():
     out = Tesseract.from_tesseract_api(_API).abstract_eval(placeholder(inputs))
     assert out["identification_error"]["shape"] == ()
     assert out["thermal_compliance"]["dtype"] == "float32"
+
+
+def test_unrolled_gradient_is_zero_when_cg_runs_no_iterations(api):
+    # Zero initial temperature, source and flux: every step's right-hand side is zero,
+    # so CG returns at once and the unrolled solve does not depend on rho.
+    rho = np.full(32, 0.5, dtype=np.float32)
+    inputs = _inputs(rho, nx=8, steps=1)
+    inputs["adjoint_mode"] = "unrolled"  # make_inputs does not pass solver options on
+    inputs["initial_temperature"] = np.zeros_like(inputs["initial_temperature"])
+    assert _J(api, inputs) == 0.0
+    np.testing.assert_array_equal(_grad(api, inputs), 0.0)

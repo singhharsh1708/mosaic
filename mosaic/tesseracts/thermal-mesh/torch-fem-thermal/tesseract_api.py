@@ -668,7 +668,12 @@ def vector_jacobian_product(
         targets.append(source_t)
         keys.append("source")
 
-    grads = torch.autograd.grad(loss, targets, allow_unused=True)
+    # An unrolled solve whose CG ran no iterations (zero right-hand side, or a warm
+    # start already within tolerance) does not depend on the inputs: zero gradient.
+    if not loss.requires_grad:
+        grads = [None] * len(targets)
+    else:
+        grads = torch.autograd.grad(loss, targets, allow_unused=True)
 
     for key, g in zip(keys, grads, strict=False):
         n_full = n_rho if key == "rho" else n_source
