@@ -729,6 +729,11 @@ def _transient_heat(
             DirichletBC(V, Constant(float(dv[k, 0])), m["dirichlet"], k + 1)
             for k in range(dv.shape[0])
         ]
+        # Dirichlet nodes take their prescribed values from t = 0 (the schema's
+        # contract), whatever initial_temperature holds there.
+        with stop_annotating():
+            for bc in bcs:
+                bc.apply(T_old.vector())
         # The matrix does not change over the steps: assemble and factorise it once
         # (as firedrake-heat does with constant_jacobian), so a step costs a
         # right-hand side and a pair of triangular solves.

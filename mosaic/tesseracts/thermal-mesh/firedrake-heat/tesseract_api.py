@@ -549,6 +549,11 @@ def _transient_heat(
         L = L + dt * q_n * v * ds(tag)
         flux = flux + q_n * T_old * ds(tag)
     bcs = [DirichletBC(V, Constant(float(dv[k, 0])), k + 1) for k in range(dv.shape[0])]
+    # Dirichlet nodes take their prescribed values from t = 0 (the schema's contract),
+    # whatever initial_temperature holds there; T_old's start is not a control.
+    with stop_annotating():
+        for bc in bcs:
+            bc.apply(T_old)
     T_new = Function(V)
     solver = LinearVariationalSolver(
         LinearVariationalProblem(a, L, T_new, bcs=bcs, constant_jacobian=True),
