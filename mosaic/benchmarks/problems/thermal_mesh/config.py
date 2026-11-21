@@ -76,7 +76,13 @@ _SOLVERS: dict[str, SolverSpec] = discover_solvers(_TESSERACT_SLUG)
 apply_styles(_SOLVERS)
 
 
-for _key in ("fenics_heat", "dealii_heat", "firedrake_heat", "torch_fem_thermal"):
+for _key in (
+    "fenics_heat",
+    "dealii_heat",
+    "firedrake_heat",
+    "torch_fem_thermal",
+    "jax_heat",
+):
     _SOLVERS[_key].input_overrides = {"k_max": _K_MAX, "p_exp": _P_EXP}
 
 

@@ -58,6 +58,7 @@ SOLVER_STYLES: dict[str, dict[str, Any]] = {
         "linestyle": (0, (3, 1, 1, 1)),
         "marker": "h",
     },
+    "jax_heat": {"color": "#66CCEE", "linestyle": (0, (1, 1)), "marker": "o"},
 }
 
 _DEFAULT: dict[str, Any] = {"color": "#999999", "linestyle": "-", "marker": "o"}

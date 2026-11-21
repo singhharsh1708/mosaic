@@ -1,0 +1,31 @@
+name: jax_heat_thermal_mesh
+version: "0.1.0"
+description: >
+  Plain-JAX HEX8 heat-conduction solver with SIMP conductivity, steady or backward Euler
+  (CG with a Jacobi preconditioner per step). Gradients via JAX reverse mode through the
+  whole solve as one compiled XLA program, with a full tape or jax.checkpoint chunks.
+build_config:
+  package_data: []
+env:
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+  XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"
+
+metadata:
+  mosaic:
+    name: "JAX"
+    backend: jax
+    family: fem
+    scheme: "FEM HEX8 heat conduction (SIMP, JAX reverse mode)"
+    discretization: FE
+    numerics: "CG+Jacobi"
+    ad_strategy: autodiff
+    differentiable: true
+    uses_gpu: true
+    internal_dtype: float64
+    doc_url: "https://docs.jax.dev/"
+    # JAX provides arrays, autodiff, CG, scan and checkpointing but no finite
+    # elements, so the solver itself is baseline here.
+    # Format: mosaic/benchmarks/core/interventions.py.
+    abstraction: kernel-toolkit
+    interventions: []
+    deviations: []

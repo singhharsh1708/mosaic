@@ -37,6 +37,7 @@ SOLVER_STYLES: dict[str, tuple] = {
     "fenics_heat": ("FEniCS", "#CC3311", ":", "D"),
     "firedrake_heat": ("Firedrake", "#EE7733", (0, (3, 1)), "v"),
     "torch_fem_thermal": ("TorchFEM", "#009988", (0, (5, 1, 1, 1)), "<"),
+    "jax_heat": ("JAX", "#33BBEE", (0, (1, 1)), "o"),
 }
 
 
@@ -64,6 +65,7 @@ FEM_ORDER: list[str] = [
     "fenics_heat",
     "firedrake_heat",
     "torch_fem_thermal",
+    "jax_heat",
 ]
 
 
@@ -82,6 +84,7 @@ THERMAL_ORDER: list[str] = [
     "fenics_heat",
     "dealii_heat",
     "torch_fem_thermal",
+    "jax_heat",
 ]
 
 

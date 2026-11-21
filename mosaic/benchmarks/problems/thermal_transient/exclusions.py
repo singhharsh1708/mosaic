@@ -3,8 +3,8 @@
 
 """Per-solver exclusions for thermal-transient.
 
-Firedrake and FEniCS implement the time loop (``steps > 0`` in their thermal-mesh
-tesseracts); FEniCS's legacy dolfin-adjoint has no checkpointing, so it runs only the
+Firedrake, FEniCS and JAX (jax-heat) implement the time loop (``steps > 0`` in their
+thermal-mesh tesseracts); FEniCS's legacy dolfin-adjoint has no checkpointing, so it runs only the
 full-tape side of the horizon sweep. The other thermal-mesh tesseracts reject the
 transient fields, so they are listed here as not implemented rather than left to
 fail; deal.II's gradient experiments are categorically out, as in thermal-mesh,
