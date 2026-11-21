@@ -18,9 +18,14 @@ Source-identification objective:
 
 Gradients (rho and source) flow through `torch.autograd` over the entire
 FE solve thanks to `model.solve(differentiable_parameters=...)` in torch-fem.
+
+With ``steps > 0`` (thermal-transient) the solver takes ``steps`` backward Euler
+steps from ``initial_temperature`` as an iterative backend: torch-fem assembles
+the element conductivity and mass matrices, and every step is a Jacobi-PCG solve
+to ``cg_rtol``, warm-started from the previous step (see ``_transient_torchfem``).
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -30,15 +35,24 @@ from mosaic_shared.problems.thermal_mesh import (
 from mosaic_shared.problems.thermal_mesh import (
     OutputSchema as _CanonicalOutputSchema,
 )
+from mosaic_shared.problems.thermal_transient import TransientFields
 from mosaic_shared.schema_types import make_differentiable
 from pydantic import Field
+from scipy.sparse import coo_matrix
+from scipy.sparse.linalg import splu
 from tesseract_core.runtime import ShapeDType
 from torchfem import SolidHeat
 from torchfem.materials import IsotropicConductivity3D
 
 
-class InputSchema(make_differentiable(_CanonicalInputSchema, ["rho", "source"])):
-    """Inputs for torch-fem thermal solver (canonical + SIMP material params)."""
+class InputSchema(
+    make_differentiable(_CanonicalInputSchema, ["rho", "source"]), TransientFields
+):
+    """Inputs for torch-fem thermal solver (canonical + SIMP material params).
+
+    With ``steps > 0`` (thermal-transient) the solver takes ``steps`` backward Euler
+    steps from ``initial_temperature`` instead of the steady solve.
+    """
 
     k_max: float = Field(
         default=1.0,
@@ -47,6 +61,25 @@ class InputSchema(make_differentiable(_CanonicalInputSchema, ["rho", "source"]))
     p_exp: float = Field(
         default=3.0,
         description="SIMP penalisation exponent p (k(ρ) = k_min + (k_max−k_min)·ρ^p).",
+    )
+    cg_rtol: float = Field(
+        default=1e-6,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "thermal-transient only: relative residual tolerance of every per-step "
+            "Jacobi-PCG solve, ||b - A x|| <= cg_rtol ||b||, warm-started from the "
+            "previous step."
+        ),
+    )
+    adjoint_mode: Literal["implicit", "unrolled"] = Field(
+        default="implicit",
+        description=(
+            "thermal-transient only: 'implicit' solves the transposed step system "
+            "exactly (sparse LU) at each returned state, the discrete adjoint along "
+            "the computed trajectory; 'unrolled' differentiates through the CG "
+            "iterations the forward executed."
+        ),
     )
 
 
@@ -251,6 +284,221 @@ def _forward_torchfem(
     return u_k, f_k, heat_flux_base
 
 
+# ---------------------------------------------------------------------------
+# Transient solve (thermal-transient: steps > 0)
+# ---------------------------------------------------------------------------
+#
+# torch-fem's own transient heat solver (``SolidHeat.integrate``) is Crank-Nicolson
+# inside a Newton loop and starts every linear solve from zero, so the time loop is
+# written here: backward Euler, as the other thermal-transient backends, with the
+# conductivity and mass matrices from torch-fem and one warm-started Jacobi-PCG solve
+# per step to ``cg_rtol``. The step matrix A = M + dt K(rho) acts on the free nodes
+# element by element; Dirichlet nodes are held at their prescribed values.
+
+
+# mosaic-intervention: transient-backward-euler
+class _StepOperator:
+    """A = M + dt sum_e w_e k_e restricted to the free nodes, element by element."""
+
+    def __init__(
+        self,
+        elements: torch.Tensor,
+        m_e: torch.Tensor,
+        k_e: torch.Tensor,
+        dt: float,
+        free: torch.Tensor,
+    ) -> None:
+        self.elements = elements
+        self.m_e = m_e
+        self.k_e = k_e
+        self.dt = dt
+        self.free = free  # (n_nodes,) float mask, 0 at Dirichlet nodes
+        self.n = free.shape[0]
+        self._lu = None
+
+    def _scatter(self, ye: torch.Tensor) -> torch.Tensor:
+        out = torch.zeros(self.n, dtype=ye.dtype, device=ye.device)
+        return out.index_add(0, self.elements.reshape(-1), ye.reshape(-1))
+
+    def mass(self, x: torch.Tensor) -> torch.Tensor:
+        """M x over all nodes."""
+        return self._scatter(torch.einsum("eij,ej->ei", self.m_e, x[self.elements]))
+
+    def full(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """(M + dt K(w)) x over all nodes."""
+        xe = x[self.elements]
+        ye = torch.einsum("eij,ej->ei", self.m_e, xe) + self.dt * w[:, None] * (
+            torch.einsum("eij,ej->ei", self.k_e, xe)
+        )
+        return self._scatter(ye)
+
+    def __call__(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        return self.free * self.full(self.free * x, w)
+
+    def diagonal(self, w: torch.Tensor) -> torch.Tensor:
+        de = torch.diagonal(self.m_e, dim1=1, dim2=2) + self.dt * w[:, None] * (
+            torch.diagonal(self.k_e, dim1=1, dim2=2)
+        )
+        return self._scatter(de)
+
+    def exact_solve(self, rhs: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """A^-1 rhs on the free nodes by sparse LU (factorised once per call)."""
+        free_idx = torch.nonzero(self.free > 0).reshape(-1).cpu().numpy()
+        if self._lu is None:
+            el = self.elements.cpu().numpy()
+            vals = (
+                (self.m_e + self.dt * w.detach()[:, None, None] * self.k_e)
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            rows = np.repeat(el, el.shape[1], axis=1).reshape(-1)
+            cols = np.tile(el, (1, el.shape[1])).reshape(-1)
+            A = coo_matrix((vals.reshape(-1), (rows, cols)), shape=(self.n, self.n))
+            self._lu = splu(A.tocsr()[free_idx][:, free_idx].tocsc())
+        out = np.zeros(self.n)
+        out[free_idx] = self._lu.solve(rhs.detach().cpu().numpy()[free_idx])
+        return torch.as_tensor(out, dtype=rhs.dtype, device=rhs.device)
+
+
+def _pcg(
+    op: _StepOperator,
+    w: torch.Tensor,
+    b: torch.Tensor,
+    x0: torch.Tensor,
+    rtol: float,
+) -> torch.Tensor:
+    """Jacobi-PCG from x0 until ||b - A x|| <= rtol ||b|| (tested every iteration).
+
+    Written out of place, so with autograd enabled the graph holds exactly the
+    iterations executed (the stopping test itself is not differentiated).
+    """
+    b_norm = float(torch.linalg.norm(b))
+    if b_norm == 0.0:
+        return torch.zeros_like(b)
+    tol = rtol * b_norm
+    d = op.diagonal(w)
+    d_inv = op.free / torch.where(op.free > 0, d, torch.ones_like(d))
+    x = x0
+    r = b - op(x, w)
+    if float(torch.linalg.norm(r)) <= tol:
+        return x
+    z = d_inv * r
+    p = z
+    rz = torch.dot(r, z)
+    for _ in range(10 * op.n):
+        Ap = op(p, w)
+        alpha = rz / torch.dot(p, Ap)
+        x = x + alpha * p
+        r = r - alpha * Ap
+        if float(torch.linalg.norm(r)) <= tol:
+            return x
+        z = d_inv * r
+        rz_next = torch.dot(r, z)
+        p = z + (rz_next / rz) * p
+        rz = rz_next
+    raise RuntimeError(
+        f"CG did not reach cg_rtol={rtol:g} within {10 * op.n} iterations"
+    )
+
+
+class _ImplicitStep(torch.autograd.Function):
+    """One backward Euler solve; the backward pass is the exact transposed solve.
+
+    The forward stops CG at ``rtol``; the backward treats the returned state x as the
+    solution of A(w) x = b and returns lambda = A^-T g_x for b and
+    -dt lambda_e^T k_e x_e for w, so the chain over the steps is the discrete
+    adjoint along the computed trajectory.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        w: torch.Tensor,
+        b: torch.Tensor,
+        x0: torch.Tensor,
+        op: _StepOperator,
+        rtol: float,
+    ) -> torch.Tensor:
+        x = _pcg(op, w.detach(), b.detach(), x0.detach(), rtol)
+        ctx.save_for_backward(w, x)
+        ctx.op = op
+        return x
+
+    @staticmethod
+    def backward(ctx: Any, g_x: torch.Tensor) -> tuple:
+        w, x = ctx.saved_tensors
+        op = ctx.op
+        lam = op.exact_solve(op.free * g_x, w)  # A is symmetric
+        g_w = -op.dt * torch.einsum(
+            "ei,eij,ej->e", lam[op.elements], op.k_e, x[op.elements]
+        )
+        return g_w, lam, None, None, None
+
+
+def _transient_torchfem(
+    points_np: np.ndarray,
+    cells_np: np.ndarray,
+    bc_dict: dict,
+    rho_t: torch.Tensor,
+    source_t: torch.Tensor,
+    k_max: float,
+    p_exp: float,
+    inputs_dict: dict,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Backward Euler from the initial temperature; returns (T_final, f_Neumann).
+
+    Each step solves (M + dt K(rho)) T_{n+1} = M T_n + dt (f_source + f_Neumann)
+    (unit heat capacity, SIMP conductivity as in the steady path) on the free nodes
+    by Jacobi-PCG to ``cg_rtol`` from T_n. ``adjoint_mode`` picks how the gradient
+    passes through each solve: the exact transposed solve at the returned state
+    (``implicit``) or autograd through the executed iterations (``unrolled``).
+    """
+    n_nodes = points_np.shape[0]
+    steps = int(inputs_dict["steps"])
+    dt = float(np.asarray(inputs_dict["dt"]).reshape(-1)[0])
+    rtol = float(inputs_dict.get("cg_rtol", 1e-6))
+    unrolled = inputs_dict.get("adjoint_mode", "implicit") == "unrolled"
+
+    nodes, elements = _build_mesh(points_np, cells_np)
+    # Unit density, so the torch-fem mass matrix is that of unit heat capacity.
+    material = IsotropicConductivity3D(kappa=float(k_max))
+    model = SolidHeat(nodes, elements, material)
+    model.material = material.vectorize(model.n_elem)
+    k_e = model.k0().detach()  # element conductivity at k_max
+    m_e = model.integrate_mass().detach()
+
+    constraints, temperatures, heat_flux_base = _build_bc_tensors(
+        model, n_nodes, bc_dict
+    )
+    src_nodal = model.integrate_body_load(source_t[:, None])
+    load = dt * (src_nodal + heat_flux_base).reshape(-1)
+
+    con = constraints.reshape(-1)
+    free = (~con).to(_DTYPE)
+    g = torch.where(con, temperatures.reshape(-1), torch.zeros_like(free))
+    op = _StepOperator(elements, m_e, k_e, dt, free)
+
+    # SIMP: k = k_max (k_min_ratio + (1 - k_min_ratio) rho^p), as in the steady path.
+    w = _K_MIN_RATIO + (1.0 - _K_MIN_RATIO) * rho_t**p_exp
+
+    T0_np = np.zeros(n_nodes)
+    T0_in = np.asarray(inputs_dict["initial_temperature"], dtype=np.float64).reshape(-1)
+    T0_np[: min(n_nodes, T0_in.size)] = T0_in[:n_nodes]
+    T = torch.where(con, g, torch.as_tensor(T0_np, dtype=_DTYPE, device=_DEVICE))
+
+    for _ in range(steps):
+        b = free * (op.mass(T) + load - op.full(g, w))
+        x0 = free * T
+        if unrolled:
+            x = _pcg(op, w, b, x0, rtol)
+        else:
+            x = _ImplicitStep.apply(w, b, x0, op, rtol)
+        T = g + x
+    return T, heat_flux_base
+    # mosaic-intervention-end: transient-backward-euler
+
+
 def _apply_core(inputs_dict: dict, want_grad: bool) -> dict:
     """Shared forward solver used by both ``apply`` and ``vector_jacobian_product``.
 
@@ -282,16 +530,28 @@ def _apply_core(inputs_dict: dict, want_grad: bool) -> dict:
     else:
         diff_params = None
 
-    u_k, _f_k, f_neumann = _forward_torchfem(
-        points_np,
-        cells_np,
-        inputs_dict["boundary_conditions"],
-        rho_t,
-        source_t,
-        k_max,
-        p_exp,
-        diff_params,
-    )
+    if int(inputs_dict.get("steps", 0)) > 0:
+        u_k, f_neumann = _transient_torchfem(
+            points_np,
+            cells_np,
+            inputs_dict["boundary_conditions"],
+            rho_t,
+            source_t,
+            k_max,
+            p_exp,
+            inputs_dict,
+        )
+    else:
+        u_k, _f_k, f_neumann = _forward_torchfem(
+            points_np,
+            cells_np,
+            inputs_dict["boundary_conditions"],
+            rho_t,
+            source_t,
+            k_max,
+            p_exp,
+            diff_params,
+        )
 
     # Compliance C = ∮_Γ_N q_n · T dΓ = f_Neumann^T · T (boundary work only,
     # not the total internal work).  Using f_k (full internal force) would add
@@ -410,7 +670,12 @@ def vector_jacobian_product(
         targets.append(source_t)
         keys.append("source")
 
-    grads = torch.autograd.grad(loss, targets, allow_unused=True)
+    # An unrolled solve whose CG ran no iterations (zero right-hand side, or a warm
+    # start already within tolerance) does not depend on the inputs: zero gradient.
+    if not loss.requires_grad:
+        grads = [None] * len(targets)
+    else:
+        grads = torch.autograd.grad(loss, targets, allow_unused=True)
 
     for key, g in zip(keys, grads, strict=False):
         n_full = n_rho if key == "rho" else n_source

@@ -3,7 +3,9 @@ version: "0.1.0"
 description: >
   torch-fem SolidHeat HEX8 heat-conduction solver with IsotropicConductivity3D SIMP material
   — the first PyTorch backend in thermal-mesh. Gradients via PyTorch autograd through the FE
-  solve; GPU-native.
+  solve; the steady solve runs on the GPU. The thermal-transient path (steps > 0) is a
+  backward Euler loop written here on torch-fem's element matrices, with warm-started CG and
+  an implicit adjoint whose exact solves run on the CPU (or an unrolled one).
 build_config:
   package_data: []
   # No CUDA base image needed: the cu121 torch wheel installs its own CUDA
@@ -131,4 +133,32 @@ metadata:
               #200, on an RTX 2000 Ada.
             evidence: "#200, notes; #301, notes."
         provenance: maintainer-authored
+      - id: transient-backward-euler
+        title: Writes the backward Euler loop, its CG and its adjoint
+        level: L2
+        necessity: required
+        what: >
+          For steps > 0, takes torch-fem's element conductivity and mass
+          matrices and runs a backward Euler loop written here: one
+          warm-started Jacobi-PCG solve per step to cg_rtol, and either an
+          implicit adjoint (exact transpose solves with a SciPy sparse LU on
+          the CPU, the discrete adjoint along the computed states) or autograd
+          through the executed CG iterations (adjoint_mode unrolled).
+        why:
+          heat-transient:
+            consequences: [cannot-express]
+            symptom: >
+              torch-fem's own transient solver (SolidHeat.integrate) is
+              Crank-Nicolson inside a Newton loop and starts every linear
+              solve from zero, so the backward Euler scheme of the other
+              backends, a warm start and a choice of adjoint cannot be
+              expressed with it.
+            notes: >
+              The implicit adjoint's LU runs on the CPU with transfers to and
+              from the solver's device, so on a GPU its memory is outside the
+              device counter and its time includes the transfers. At cg_rtol
+              1e-12 both adjoints match the exact discrete reference to float32
+              round-off.
+            evidence: "tests/test_torch_fem_thermal_transient.py; transient-heat-spike studies/fd_served."
+        provenance: contributor
     deviations: []
